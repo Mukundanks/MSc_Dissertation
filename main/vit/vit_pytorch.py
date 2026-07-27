@@ -1,0 +1,788 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
+import torchvision
+from torchvision import models
+from torch.utils.data import DataLoader, Dataset
+import torch.utils.data as utils
+from torchvision import transforms
+
+import cv2
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
+import os
+import math
+import copy
+import sys
+from tqdm import tqdm
+
+
+import neptune.new as neptune
+from sklearn.model_selection import train_test_split, StratifiedKFold
+from sklearn.utils import class_weight, shuffle
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import f1_score, fbeta_score
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+    precision_recall_curve,
+    classification_report,
+    cohen_kappa_score,
+    accuracy_score,
+)
+import splitfolders
+
+
+from PIL import Image, ImageFilter, ImageOps
+
+
+import warnings
+
+warnings.filterwarnings("ignore")
+
+
+import skimage.io
+from skimage.transform import resize
+from imgaug import augmenters as iaa
+
+
+import tensorflow as tf
+import keras
+from keras.losses import binary_crossentropy
+from keras_applications.resnet import ResNet50, preprocess_input
+import keras.backend as K
+from keras.utils import Sequence
+from keras.utils import to_categorical
+
+
+WORKERS = 2
+CHANNEL = 3
+
+
+IMG_SIZE = 512
+NUM_CLASSES = 5
+SEED = 77
+
+
+"""# Create Dataset"""
+
+dtype = torch.FloatTensor
+dtype = torch.cuda.FloatTensor
+
+
+img_dir = "/users/sgmsures/project/dataset/train_images/"
+
+data = pd.read_csv("/users/sgmsures/project/dataset/train.csv")
+data.head()
+
+data1 = pd.concat([data, pd.get_dummies(data.diagnosis)], axis=1)
+data1.head()
+
+# img = img_dir + data.id_code[0] + ".png"
+# img = cv2.imread(img)
+# plt.imshow(img)
+
+
+# creating classes based on csv
+try:
+    no = data[data.diagnosis == 0]
+    mild = data[data.diagnosis == 1]
+    moderate = data[data.diagnosis == 2]
+    severe = data[data.diagnosis == 3]
+    dr = data[data.diagnosis == 4]
+except:
+    pass
+# segregating images
+try:
+
+    def seperation(data):
+        file_path = []
+        for f in range(len(data)):
+            file = data.id_code.iloc[f]
+            file = img_dir + file + ".png"
+            file_path.append(file)
+        return file_path
+
+    no = seperation(no)
+    mild = seperation(mild)
+    moderate = seperation(moderate)
+    severe = seperation(severe)
+    dr = seperation(dr)
+
+    # checking if the execution was right
+    len(no) + len(mild) + len(moderate) + len(severe) + len(dr) == len(data)
+except:
+    pass
+# creating new folders for different classes
+try:
+    os.mkdir("/users/sgmsures/project/dataset/processed/train")
+    os.mkdir("/users/sgmsures/project/dataset/processed/train/no")
+    os.mkdir("/users/sgmsures/project/dataset/processed/train/mild")
+    os.mkdir("/users/sgmsures/project/dataset/processed/train/moderate")
+    os.mkdir("/users/sgmsures/project/dataset/processed/train/severe")
+    os.mkdir("/users/sgmsures/project/dataset/processed/train/dr")
+except:
+    pass
+
+# moving the images
+try:
+
+    def move(path, dst="/users/sgmsures/project/dataset/processed/train/no"):
+        for old_path in path:
+            name = old_path.split("/")
+            name = name[-1]
+            os.rename(old_path, f"{dst}/{name}")
+        move(no)
+        move(mild, dst="/users/sgmsures/project/dataset/processed/train/mild")
+        move(moderate, dst="/users/sgmsures/project/dataset/processed/train/moderate")
+        move(severe, dst="/users/sgmsures/project/dataset/processed/train/severe")
+        move(dr, dst="/users/sgmsures/project/dataset/processed/train/dr")
+
+except:
+    pass
+# !rm -r -f output/
+
+
+# data_dir = '/content/train/'
+
+
+try:
+    splitfolders.ratio(
+        "/users/sgmsures/project/dataset/processed/train/",
+        output="/users/sgmsures/project/dataset/processed/output",
+        seed=1337,
+        ratio=(0.8, 0.1, 0.1),
+    )
+except:
+    pass
+train_dir = "/users/sgmsures/project/dataset/processed/output/train/"
+val_dir = "/users/sgmsures/project/dataset/processed/output/val/"
+test_dir = "/users/sgmsures/project/dataset/processed/output/test/"
+
+train_csv = pd.read_csv("/users/sgmsures/project/dataset/train.csv")
+
+train_df, val_df = train_test_split(
+    train_csv, test_size=0.1, stratify=train_csv.diagnosis
+)
+train_df.reset_index(drop=True, inplace=True)
+val_df.reset_index(drop=True, inplace=True)
+train_df.head()
+
+bs = 32
+crop_size = 255
+
+
+def dataset(bs, crop_size, sample_size="full"):
+    transformations = torchvision.transforms.Compose(
+        [
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Resize(crop_size),
+            torchvision.transforms.CenterCrop(crop_size),
+            torchvision.transforms.Normalize(
+                mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+            ),
+        ]
+    )
+
+    if sample_size == "full":
+        train_data = torchvision.datasets.ImageFolder(
+            root=train_dir, transform=transformations
+        )
+        valid_data = torchvision.datasets.ImageFolder(
+            root=val_dir, transform=transformations
+        )
+        test_data = torchvision.datasets.ImageFolder(
+            root=test_dir, transform=transformations
+        )
+
+        train_data = torch.utils.data.DataLoader(
+            train_data, shuffle=True, batch_size=bs
+        )
+        valid_data = torch.utils.data.DataLoader(
+            valid_data, shuffle=True, batch_size=bs
+        )
+        test_loader = torch.utils.data.DataLoader(
+            test_data, shuffle=True, batch_size=bs
+        )
+
+    else:
+        train_data = torchvision.datasets.ImageFolder(
+            root=train_dir, transform=transformations
+        )
+        indices = torch.arange(sample_size)
+        train_data = torch.utils.data.Subset(train_data, indices)
+        train_data = torch.utils.data.DataLoader(
+            train_data, shuffle=True, batch_size=bs
+        )
+
+    valid_data = torchvision.datasets.ImageFolder(
+        root=val_dir, transform=transformations
+    )
+    valid_data = torch.utils.data.DataLoader(valid_data, shuffle=True, batch_size=bs)
+
+    test_data = torchvision.datasets.ImageFolder(
+        root=test_dir, transform=transformations
+    )
+    test_data = torch.utils.data.DataLoader(test_data, shuffle=True, batch_size=bs)
+
+    return train_data, valid_data, test_data
+
+
+"""# Data Modeling"""
+
+from torch.nn.modules.utils import _pair
+
+
+class Embeddings(nn.Module):
+    """Construct the embeddings from patch, position embeddings."""
+
+    def __init__(self, img_size: int, hidden_size: int, in_channels: int):
+
+        super(Embeddings, self).__init__()
+        img_size = _pair(img_size)
+
+        patch_size = _pair(img_size)
+        n_patches = (img_size[0] // patch_size[0]) * (img_size[1] // patch_size[1])
+
+        self.patch_embeddings = Conv2d(
+            in_channels=in_channels,
+            out_channels=hidden_size,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+
+        self.position_embeddings = nn.Parameter(torch.zeros(1, 2, hidden_size))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
+
+        self.dropout = Dropout(0.1)
+
+    def forward(self, x):
+        B = x.shape[0]
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+
+        x = self.patch_embeddings(x)
+        x = x.flatten(2)
+        x = x.transpose(-1, -2)
+        x = torch.cat((cls_tokens, x), dim=1)
+
+        embeddings = x + self.position_embeddings
+        embeddings = self.dropout(embeddings)
+        return embeddings
+
+
+class Attention(nn.Module):
+    def __init__(self, num_attention_heads, hidden_size, attention_dropout_rate):
+        super(Attention, self).__init__()
+        self.num_attention_heads = num_attention_heads
+        self.attention_head_size = int(hidden_size / self.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+        self.query = Linear(hidden_size, self.all_head_size)
+        self.key = Linear(hidden_size, self.all_head_size)
+        self.value = Linear(hidden_size, self.all_head_size)
+
+        self.out = Linear(hidden_size, self.all_head_size)
+        self.attn_dropout = Dropout(attention_dropout_rate)
+        self.proj_dropout = Dropout(attention_dropout_rate)
+
+        self.softmax = torch.nn.Softmax(dim=-1)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (
+            self.num_attention_heads,
+            self.attention_head_size,
+        )
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+    def forward(self, hidden_states):
+        mixed_query_layer = self.query(hidden_states)
+        mixed_key_layer = self.key(hidden_states)
+        mixed_value_layer = self.value(hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        attention_probs = self.softmax(attention_scores)
+        weights = attention_probs
+        attention_probs = self.attn_dropout(attention_probs)
+
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+        attention_output = self.out(context_layer)
+        attention_output = self.proj_dropout(attention_output)
+        return attention_output, weights
+
+
+class Mlp(nn.Module):
+    def __init__(self, hidden_size, linear_dim, dropout_rate, std_norm):
+        super(Mlp, self).__init__()
+        self.fc1 = Linear(hidden_size, linear_dim)
+        self.fc2 = Linear(linear_dim, hidden_size)
+        self.act_fn = torch.nn.functional.gelu
+        self.dropout = Dropout(dropout_rate)
+        self.std_norm = std_norm
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.normal_(self.fc1.bias, std=self.std_norm)
+        nn.init.normal_(self.fc2.bias, std=self.std_norm)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act_fn(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        x = self.dropout(x)
+        return x
+
+
+class Block(nn.Module):
+    def __init__(
+        self,
+        num_attention_heads,
+        hidden_size,
+        linear_dim,
+        dropout_rate,
+        attention_dropout_rate,
+        eps,
+        std_norm,
+    ):
+
+        super(Block, self).__init__()
+        self.hidden_size = hidden_size
+        self.attention_norm = LayerNorm(hidden_size, eps=eps)
+        self.ffn_norm = LayerNorm(hidden_size, eps=eps)
+        self.ffn = Mlp(
+            hidden_size=hidden_size,
+            linear_dim=linear_dim,
+            dropout_rate=dropout_rate,
+            std_norm=std_norm,
+        )
+        self.attn = Attention(
+            num_attention_heads=num_attention_heads,
+            hidden_size=hidden_size,
+            attention_dropout_rate=attention_dropout_rate,
+        )
+
+    def forward(self, x):
+        h = x
+        x = self.attention_norm(x)
+        x, weights = self.attn(x)
+        x = x + h
+        h = x
+        x = self.ffn_norm(x)
+        x = self.ffn(x)
+        x = x + h
+        return x, weights
+
+
+class Encoder(nn.Module):
+    def __init__(
+        self,
+        num_layers,
+        hidden_size,
+        num_attention_heads,
+        linear_dim,
+        dropout_rate,
+        attention_dropout_rate,
+        eps,
+        std_norm,
+    ):
+        super(Encoder, self).__init__()
+        self.layer = nn.ModuleList()
+        self.encoder_norm = LayerNorm(hidden_size, eps=eps)
+        for _ in range(num_layers):
+            layer = Block(
+                num_attention_heads,
+                hidden_size,
+                linear_dim,
+                dropout_rate,
+                attention_dropout_rate,
+                eps,
+                std_norm,
+            )
+            self.layer.append(copy.deepcopy(layer))
+
+    def forward(self, hidden_states):
+        attn_weights = []
+        for layer_block in self.layer:
+            hidden_states, weights = layer_block(hidden_states)
+            attn_weights.append(weights)
+        encoded = self.encoder_norm(hidden_states)
+        return encoded, attn_weights
+
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        img_size,
+        hidden_size,
+        in_channels,
+        num_layers,
+        num_attention_heads,
+        linear_dim,
+        dropout_rate,
+        attention_dropout_rate,
+        eps,
+        std_norm,
+    ):
+        super(Transformer, self).__init__()
+        self.embeddings = Embeddings(img_size, hidden_size, in_channels)
+
+        self.encoder = Encoder(
+            num_layers,
+            hidden_size,
+            num_attention_heads,
+            linear_dim=config.LINEAR_DIM,
+            dropout_rate=config.DROPOUT_RATE,
+            attention_dropout_rate=config.ATTENTION_DROPOUT_RATE,
+            eps=config.EPS,
+            std_norm=config.STD_NORM,
+        )
+
+    def forward(self, input_ids):
+        embedding_output = self.embeddings(input_ids)
+        encoded, attn_weights = self.encoder(embedding_output)
+        return encoded, attn_weights
+
+
+class VisionTransformer(nn.Module):
+    def __init__(
+        self,
+        img_size,
+        num_classes,
+        hidden_size,
+        in_channels,
+        num_layers,
+        num_attention_heads,
+        linear_dim,
+        dropout_rate,
+        attention_dropout_rate,
+        eps,
+        std_norm,
+    ):
+        super(VisionTransformer, self).__init__()
+        self.classifier = "token"
+
+        self.transformer = Transformer(
+            img_size,
+            hidden_size,
+            in_channels,
+            num_layers,
+            num_attention_heads,
+            linear_dim,
+            dropout_rate,
+            attention_dropout_rate,
+            eps,
+            std_norm,
+        )
+        self.head = Linear(hidden_size, num_classes)
+
+    def forward(self, x, labels=None):
+        x, attn_weights = self.transformer(x)
+        logits = self.head(x[:, 0])
+
+        if labels is not None:
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(logits.view(-1, 400), labels.view(-1))
+            return loss
+        else:
+            return logits, attn_weights
+
+
+def train_Engine(
+    n_epochs,
+    train_data,
+    val_data,
+    model,
+    optimizer,
+    device,
+    loss_fn="nll_loss",
+    monitoring=True,
+):
+
+    logits_m = []
+    yo = []
+    attention = []
+
+    best_accuracy = 0
+    for epoch in range(1, n_epochs + 1):
+        print("Epoch:", epoch)
+        for i, (data, target) in tqdm(
+            enumerate(train_data), total=len(train_data), desc="Training"
+        ):
+            total_samples = len(train_data.dataset)
+            best_accuracy = 0
+            # device
+            model = model.to(device)
+            x = data.to(device)
+            y = target.to(device)
+            optimizer.zero_grad()
+
+            logits, attn_weights = model(x)
+            proba = F.log_softmax(logits, dim=1)
+            loss = F.nll_loss(proba, y, reduction="sum")
+            loss.backward()
+
+            yhat = torch.argmax(logits, dim=1)
+            accuracy = torch.sum(yhat == y).item() / len(train_data)
+            optimizer.step()
+
+            if monitoring:
+                run["Training_loss"].log(loss.item())
+                run["Training_acc"].log(accuracy)
+
+            if accuracy > best_accuracy:
+                best_model = model
+                torch.save(best_model, f"/users/sgmsures/project/dataset/ViT.pth")
+
+        model.eval()
+        total_samples = len(val_data.dataset)
+        correct_samples = 0
+        total_loss = 0
+
+        with torch.no_grad():
+            for i, (data, target) in tqdm(
+                enumerate(val_data), total=len(val_data), desc="Evaluation"
+            ):
+
+                model = model.to(device)
+                x = data.to(device)
+                y = target.to(device)
+
+                logits, attn_weights = model(x)
+                proba = F.log_softmax(logits, dim=1)
+                val_loss = F.nll_loss(proba, y, reduction="sum")
+                _, pred = torch.max(logits, dim=1)
+
+                for t, p in zip(y.view(-1), pred.view(-1)):
+                    confusion_matrix[t.long(), p.long()] += 1
+
+                total_loss += val_loss.item()
+                correct_samples += pred.eq(y).sum()
+                val_acc = torch.sum(pred == y).item() / len(val_data)
+                avg_loss = total_loss / total_samples
+
+                if monitoring:
+                    run["Val_loss"].log(avg_loss)
+                    run["Val_accuracy"].log(val_acc)
+
+    return confusion_matrix, logits_m, yo, attention
+
+
+class Config:
+    # Image configuration
+    IMG_SIZE = 255
+    PATCH_SIZE = 10
+    CROP_SIZE = 255
+    BATCH_SIZE = 32
+    DATASET_SAMPLE = "full"
+    N_EPOCHS = 25
+
+    # opimizer configuration
+    LR = 0.003
+    OPIMIZER = "Adam"
+
+    # Model configuration
+    NUM_CLASSES = 5
+    IN_CHANNELS = 3
+    HIDDEN_SIZE = 768
+    NUM_ATTENTION_HEADS = 12
+    LINEAR_DIM = 3072
+    NUM_LAYERS = 12
+
+    ATTENTION_DROPOUT_RATE = 0.1
+    DROPOUT_RATE = 0.1
+    STD_NORM = 1e-6
+    EPS = 1e-6
+
+    MPL_DIM = 128
+    OUTPUT = "softmax"
+    LOSS_FN = "nll_loss"
+
+    # Device configuration
+    DEVICE = ["cpu", "cuda"]
+
+
+# Config.__dict__
+config = Config()
+
+
+x = torch.randn(1, config.IN_CHANNELS * config.IMG_SIZE * config.IMG_SIZE)
+x = x.reshape(1, config.IN_CHANNELS, config.IMG_SIZE, config.IMG_SIZE)
+
+model = VisionTransformer(
+    img_size=config.IMG_SIZE,
+    num_classes=config.NUM_CLASSES,
+    hidden_size=config.HIDDEN_SIZE,
+    in_channels=config.IN_CHANNELS,
+    num_layers=config.NUM_LAYERS,
+    num_attention_heads=config.NUM_ATTENTION_HEADS,
+    linear_dim=config.LINEAR_DIM,
+    dropout_rate=config.DROPOUT_RATE,
+    attention_dropout_rate=config.ATTENTION_DROPOUT_RATE,
+    eps=config.EPS,
+    std_norm=config.STD_NORM,
+)
+
+optimizer = optim.Adam(model.parameters(), lr=0.003)
+
+run = neptune.init(
+    project="mukundanks/DR-702",
+    api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiI3YTM2ZmU2NS1kM2RmLTRkMTAtOTJkOC1iMDk5Yzg3ZDI1M2MifQ==",
+)
+logits, attn_weights = model(x)
+
+if __name__ == "__main__":
+
+    config = Config()
+    params = neptune_monitoring(Config)
+    run = neptune.init(
+        project="mukundanks/DR-702",
+        api_token="eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vYXBwLm5lcHR1bmUuYWkiLCJhcGlfdXJsIjoiaHR0cHM6Ly9hcHAubmVwdHVuZS5haSIsImFwaV9rZXkiOiI3YTM2ZmU2NS1kM2RmLTRkMTAtOTJkOC1iMDk5Yzg3ZDI1M2MifQ==",
+    )
+    run["parameters"] = params
+
+    model = VisionTransformer(
+        img_size=config.IMG_SIZE,
+        num_classes=config.NUM_CLASSES,
+        hidden_size=config.HIDDEN_SIZE,
+        in_channels=config.IN_CHANNELS,
+        num_layers=config.NUM_LAYERS,
+        num_attention_heads=config.NUM_ATTENTION_HEADS,
+        linear_dim=config.LINEAR_DIM,
+        dropout_rate=config.DROPOUT_RATE,
+        attention_dropout_rate=config.ATTENTION_DROPOUT_RATE,
+        eps=config.EPS,
+        std_norm=config.STD_NORM,
+    )
+
+    train_data, val_data, test_data = dataset(
+        config.BATCH_SIZE, config.IMG_SIZE, config.DATASET_SAMPLE
+    )
+
+    optimizer = optim.Adam(model.parameters(), lr=0.003)
+    train_Engine(
+        n_epochs=config.N_EPOCHS,
+        train_data=train_data,
+        val_data=val_data,
+        model=model,
+        optimizer=optimizer,
+        loss_fn="nll_loss",
+        device=config.DEVICE[1],
+        monitoring=True,
+    )
+
+"""# Test
+
+"""
+
+# train_data, val_data, test_data = dataset(config.BATCH_SIZE,config.IMG_SIZE, config.DATASET_SAMPLE)
+
+test_data
+
+from tqdm import tqdm
+
+m = torch.load(
+    f"/users/sgmsures/project/dataset/ViT.pth", map_location=torch.device("cuda")
+)
+
+total_samples = len(valid_data.dataset)
+correct_samples = 0
+total_loss = 0
+
+confusion_matrix = torch.zeros(400, 400)
+
+
+c = 0
+total = 0
+device = "cuda"
+n_epochs = 25
+total_step = len(train_data)
+iterations = 12
+
+logits_ = []
+ground = []
+
+with torch.no_grad():
+    model.eval()
+    for epoch in range(1, n_epochs):
+        with tqdm(test_data, unit="batch") as tepoch:
+            tepoch.set_description(f"Epoch {epoch}")
+            for batch_idx, (data, target) in enumerate(tepoch):
+                total_samples = len(train_data.dataset)
+                best_accuracy = 0
+                # device
+                model = model.to(device)
+                x = data.to(device)
+                y = target.to(device)
+                logits, attn_weights = model(x)
+                proba = F.log_softmax(logits, dim=1)
+                loss = F.nll_loss(proba, y, reduction="sum")
+                _, pred = torch.max(logits, dim=1)
+                c += torch.sum(pred == y).item()
+                total += target.size(0)
+                tepoch.set_postfix(loss=loss.item(), accuracy=(100 * c / total))
+
+                logits_.append(logits)
+                ground.append(y)
+
+        for t, p in zip(y.view(-1), pred.view(-1)):
+            confusion_matrix[t.long(), p.long()] += 1
+
+import seaborn as sns
+
+plt.figure(figsize=(12, 8))
+cm = sns.heatmap(confusion_matrix)
+confusion = cm.figure
+run["confusion_matrix-img"].upload(confusion)
+
+probs = torch.zeros(len(logits_))
+run["probability"].log(probs)
+
+y_ = torch.zeros(len(ground))
+idx = 0
+for l, o in zip(logits_, ground):
+    _, l = torch.max(l, dim=1)
+    probs[idx] = l
+    y_[idx] = o.item()
+    idx += 1
+
+prob = probs.to(torch.long).numpy()
+
+y_ = y_.to(torch.long).numpy()
+
+
+accuracy = accuracy_score(y_, prob)
+run["accuracy"].log(accuracy)
+
+kappa_score = cohen_kappa_score(y_, prob)
+run["kappa_score"].log(kappa_score)
+
+classification = classification_report(y_, prob)
+run["classification"].log(classification)
+
+precision = precision_score(y_, prob, average="micro")
+run["precision"].log(precision)
+
+f1 = f1_score(y_, prob, average="micro")
+run["f1"].log(f1)
+
+recall = recall_score(y_, prob, average="micro")
+run["recall"].log(recall)
